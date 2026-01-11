@@ -182,7 +182,7 @@ extern "C" void OnModLoad() {
     logger->Info("Hooking by symbol names (no hardcoded offsets)...");
     
     // Hook RQShader::BuildSource by symbol
-    void* buildSourceAddr = aml->GetSym(hGTASA, "_ZN8RQShader11BuildSourceEjPPKcS2_");
+    void* buildSourceAddr = (void*)aml->GetSym(hGTASA, "_ZN8RQShader11BuildSourceEjPPKcS2_");
     if(buildSourceAddr) {
         if(aml->Hook(buildSourceAddr, (void*)RQShaderBuildSource_hook, (void**)&RQShaderBuildSource_orig)) {
             logger->Info("✓ Hooked RQShader::BuildSource");
@@ -194,7 +194,7 @@ extern "C" void OnModLoad() {
     }
     
     // Hook ES2Shader::Select by symbol
-    void* selectAddr = aml->GetSym(hGTASA, "_ZN9ES2Shader6SelectEv");
+    void* selectAddr = (void*)aml->GetSym(hGTASA, "_ZN9ES2Shader6SelectEv");
     if(selectAddr) {
         if(aml->Hook(selectAddr, (void*)ES2Shader_Select_hook, (void**)&ES2Shader_Select_orig)) {
             logger->Info("✓ Hooked ES2Shader::Select");
@@ -206,7 +206,7 @@ extern "C" void OnModLoad() {
     }
     
     // Hook ES2Shader::InitializeAfterCompile by symbol
-    void* initAddr = aml->GetSym(hGTASA, "_ZN9ES2Shader22InitializeAfterCompileEv");
+    void* initAddr = (void*)aml->GetSym(hGTASA, "_ZN9ES2Shader22InitializeAfterCompileEv");
     if(initAddr) {
         if(aml->Hook(initAddr, (void*)ES2Shader_InitAfterCompile_hook, (void**)&ES2Shader_InitAfterCompile_orig)) {
             logger->Info("✓ Hooked ES2Shader::InitializeAfterCompile");
