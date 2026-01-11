@@ -18,6 +18,15 @@ jobs:
       with:
         ndk-version: r21e
         add-to-path: true
+    
+    - name: Download AML Headers
+      run: |
+        cd jni
+        git clone https://github.com/AndroidModLoader/AML_Headers.git temp
+        cp -r temp/mod .
+        cp -r temp/include .
+        rm -rf temp
+        ls -la
         
     - name: Build with NDK
       run: |
