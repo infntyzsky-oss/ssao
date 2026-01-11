@@ -13,12 +13,10 @@ NEEDGAME(com.rockstargames.gtasa)
 uintptr_t pGTASA = 0;
 void* hGTASA = NULL;
 
-// Game pointers
 uint32_t* m_snTimeInMilliseconds;
 uint32_t* curShaderStateFlags;
 float* UnderWaterness;
 
-// RenderWare structures
 struct RwV3d { float x, y, z; };
 struct RwMatrix {
     RwV3d right, up, at, pos;
@@ -35,7 +33,6 @@ struct RwCamera {
     float fogPlane;
 };
 
-// OpenGL function pointers
 typedef int (*glGetUniformLocation_t)(int, const char*);
 typedef void (*glUniform1i_t)(int, int);
 typedef void (*glUniform1fv_t)(int, int, const float*);
@@ -72,12 +69,10 @@ glViewport_t _glViewport;
 glCheckFramebufferStatus_t _glCheckFramebufferStatus;
 glActiveTexture_t _glActiveTexture;
 
-// Matrix cache
 float cachedMVP[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
 float cachedModelView[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
 bool matrixCaptured = false;
 
-// Depth target
 GLuint depthTexture = 0;
 GLuint depthFBO = 0;
 bool depthTargetReady = false;
@@ -112,7 +107,6 @@ void CreateDepthTarget() {
     _glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-// Depth shader
 const char* depthVertexShader = R"(
 #version 300 es
 precision highp float;
@@ -141,7 +135,6 @@ void main() {
 }
 )";
 
-// SSAO shader
 const char* ssaoVertexShader = R"(
 #version 300 es
 precision highp float;
@@ -284,7 +277,6 @@ struct SSAOShaderEx {
     int uid_uFadeoutEnd;
 };
 
-// Matrix hooks
 DECL_HOOKv(glUniformMatrix4fv_Hook, int location, int count, uint8_t transpose, const float* value) {
     if(!isDepthPass && count == 1 && value) {
         memcpy(cachedMVP, value, 64);
@@ -304,7 +296,6 @@ DECL_HOOKv(glUniformMatrix3fv_Hook, int location, int count, uint8_t transpose, 
     _glUniformMatrix3fv_real(location, count, transpose, value);
 }
 
-// Shader injection
 DECL_HOOK(int, RQShaderBuildSource, int flags, char** pxlsrc, char** vtxsrc) {
     int ret = RQShaderBuildSource(flags, pxlsrc, vtxsrc);
     
@@ -330,6 +321,220 @@ DECL_HOOK(int, RQShaderBuildSource, int flags, char** pxlsrc, char** vtxsrc) {
         depthShaderInjected = true;
     }
     else if(!isDepthPass && !ssaoShaderInjected && isBuilding) {
+        logger->Info("SSAO SHADER INJECT at 0x%X", flags);
+        
+        strncpy(ssaoFragShaderBuf, ssaoFragmentShader, SHADER_LEN - 1);
+        ssaoFragShaderBuf[SHADER_LEN - 1] = '\0';
+        *pxlsrc = ssaoFragShaderBuf;
+        
+        strncpy(ssaoVertShaderBuf, ssaoVertexShader, SHADER_LEN - 1);
+        ssaoVertShaderBuf[SHADER_LEN - 1] = '\0';
+        *vtxsrc = ssaoVertShaderBuf;
+        
+        ssaoShaderInjected = true;
+    }
+    
+    return ret;
+}
+
+DECL_HOOKv(ES2Shader_Select, SSAOShaderEx* self) {
+    ES2Shader_Select(self);
+    
+    if(!_glGetUniformLocation) return;
+    
+    int shaderId = *(int*)self;
+    
+    if(isDepthPass && depthShaderInjected) {
+        DepthShaderEx* depthShader = (DepthShaderEx*)self;
+        if(depthShader->uid_uMVP == -1) {
+            depthShader->uid_uMVP = _glGetUniformLocation(shaderId, "uMVP");
+            logger->Info("Depth shader uniforms loaded");
+        }
+        
+        if(depthShader->uid_uMVP >= 0 && matrixCaptured) {
+            _glUniformMatrix4fv_real(depthShader->uid_uMVP, 1, 0, cachedMVP);
+        }
+    }
+    else if(!isDepthPass && ssaoShaderInjected) {
+        if(self->uid_uDepthTex == -1) {
+            self->uid_uSceneTex = _glGetUniformLocation(shaderId, "uSceneTex");
+            self->uid_uDepthTex = _glGetUniformLocation(shaderId, "uDepthTex");
+            self->uid_uPixelSize = _glGetUniformLocation(shaderId, "uPixelSize");
+            self->uid_uSampleRadius = _glGetUniformLocation(shaderId, "uSampleRadius");
+            self->uid_uSampleCount = _glGetUniformLocation(shaderId, "uSampleCount");
+            self->uid_uIntensity = _glGetUniformLocation(shaderId, "uIntensity");
+            self->uid_uTime = _glGetUniformLocation(shaderId, "uTime");
+            self->uid_uFadeoutStart = _glGetUniformLocation(shaderId, "uFadeoutStart");
+            self->uid_uFadeoutEnd = _glGetUniformLocation(shaderId, "uFadeoutEnd");
+            
+            logger->Info("SSAO shader uniforms loaded");
+        }
+        
+        if(self->uid_uDepthTex >= 0) {
+            _glActiveTexture(GL_TEXTURE0);
+            if(self->uid_uSceneTex >= 0) _glUniform1i(self->uid_uSceneTex, 0);
+            
+            _glActiveTexture(GL_TEXTURE1);
+            _glBindTexture(GL_TEXTURE_2D, depthTexture);
+            _glUniform1i(self->uid_uDepthTex, 1);
+            
+            _glActiveTexture(GL_TEXTURE0);
+            
+            float pixelSize[2] = {1.0f / screenWidth, 1.0f / screenHeight};
+            _glUniform2fv(self->uid_uPixelSize, 1, pixelSize);
+            
+            float sampleRadius = 3.0f;
+            _glUniform1fv(self->uid_uSampleRadius, 1, &sampleRadius);
+            
+            int sampleCount = 16;
+            _glUniform1i(self->uid_uSampleCount, sampleCount);
+            
+            float intensity = 1.0f;
+            _glUniform1fv(self->uid_uIntensity, 1, &intensity);
+            
+            if(m_snTimeInMilliseconds) {
+                float time = (float)(*m_snTimeInMilliseconds);
+                _glUniform1fv(self->uid_uTime, 1, &time);
+            }
+            
+            float fadeoutStart = 0.8f;
+            _glUniform1fv(self->uid_uFadeoutStart, 1, &fadeoutStart);
+            
+            float fadeoutEnd = 1.0f;
+            _glUniform1fv(self->uid_uFadeoutEnd, 1, &fadeoutEnd);
+        }
+    }
+}
+
+DECL_HOOKv(ES2Shader_InitAfterCompile, SSAOShaderEx* self) {
+    ES2Shader_InitAfterCompile(self);
+    
+    self->uid_uSceneTex = -1;
+    self->uid_uDepthTex = -1;
+    self->uid_uPixelSize = -1;
+    self->uid_uSampleRadius = -1;
+    self->uid_uSampleCount = -1;
+    self->uid_uIntensity = -1;
+    self->uid_uTime = -1;
+    self->uid_uFadeoutStart = -1;
+    self->uid_uFadeoutEnd = -1;
+}
+
+typedef void (*RwCameraForAllClumpsInFrustum_t)(RwCamera*, void*);
+RwCameraForAllClumpsInFrustum_t _RwCameraForAllClumpsInFrustum;
+
+DECL_HOOKv(RwCameraForAllClumpsInFrustum_Hook, RwCamera* camera, void* callback) {
+    if(!depthTargetReady) {
+        CreateDepthTarget();
+    }
+    
+    if(depthTargetReady) {
+        isDepthPass = true;
+        depthShaderInjected = false;
+        
+        _glBindFramebuffer(GL_FRAMEBUFFER, depthFBO);
+        _glViewport(0, 0, screenWidth, screenHeight);
+        _glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        
+        _RwCameraForAllClumpsInFrustum(camera, callback);
+        
+        _glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        isDepthPass = false;
+    }
+    
+    ssaoShaderInjected = false;
+    _RwCameraForAllClumpsInFrustum(camera, callback);
+}
+
+void LoadGLFunctions() {
+    void* hGLES = aml->GetLibHandle("libGLESv3.so");
+    if(!hGLES) hGLES = aml->GetLibHandle("libGLESv2.so");
+    
+    if(!hGLES) {
+        logger->Error("OpenGL library not found");
+        return;
+    }
+    
+    _glGetUniformLocation = (glGetUniformLocation_t)aml->GetSym(hGLES, "glGetUniformLocation");
+    _glUniform1i = (glUniform1i_t)aml->GetSym(hGLES, "glUniform1i");
+    _glUniform1fv = (glUniform1fv_t)aml->GetSym(hGLES, "glUniform1fv");
+    _glUniform2fv = (glUniform2fv_t)aml->GetSym(hGLES, "glUniform2fv");
+    _glGenFramebuffers = (glGenFramebuffers_t)aml->GetSym(hGLES, "glGenFramebuffers");
+    _glBindFramebuffer = (glBindFramebuffer_t)aml->GetSym(hGLES, "glBindFramebuffer");
+    _glFramebufferTexture2D = (glFramebufferTexture2D_t)aml->GetSym(hGLES, "glFramebufferTexture2D");
+    _glGenTextures = (glGenTextures_t)aml->GetSym(hGLES, "glGenTextures");
+    _glBindTexture = (glBindTexture_t)aml->GetSym(hGLES, "glBindTexture");
+    _glTexImage2D = (glTexImage2D_t)aml->GetSym(hGLES, "glTexImage2D");
+    _glTexParameteri = (glTexParameteri_t)aml->GetSym(hGLES, "glTexParameteri");
+    _glClear = (glClear_t)aml->GetSym(hGLES, "glClear");
+    _glViewport = (glViewport_t)aml->GetSym(hGLES, "glViewport");
+    _glCheckFramebufferStatus = (glCheckFramebufferStatus_t)aml->GetSym(hGLES, "glCheckFramebufferStatus");
+    _glActiveTexture = (glActiveTexture_t)aml->GetSym(hGLES, "glActiveTexture");
+    
+    uintptr_t matrix4fv = aml->GetSym(hGLES, "glUniformMatrix4fv");
+    uintptr_t matrix3fv = aml->GetSym(hGLES, "glUniformMatrix3fv");
+    
+    if(matrix4fv) {
+        HOOK(glUniformMatrix4fv_Hook, (void*)matrix4fv);
+        _glUniformMatrix4fv_real = (glUniformMatrix4fv_t)matrix4fv;
+        logger->Info("Hooked glUniformMatrix4fv");
+    }
+    
+    if(matrix3fv) {
+        HOOK(glUniformMatrix3fv_Hook, (void*)matrix3fv);
+        _glUniformMatrix3fv_real = (glUniformMatrix3fv_t)matrix3fv;
+        logger->Info("Hooked glUniformMatrix3fv");
+    }
+    
+    logger->Info("GL functions loaded");
+}
+
+extern "C" void OnModPreLoad() {
+    logger->SetTag("SSAO_DEPTH");
+    logger->Info("DEPTH PREPASS SSAO PREPARING");
+}
+
+extern "C" void OnModLoad() {
+    logger->SetTag("SSAO_DEPTH");
+    
+    pGTASA = aml->GetLib("libGTASA.so");
+    hGTASA = aml->GetLibHandle("libGTASA.so");
+    
+    if(!pGTASA || !hGTASA) {
+        logger->Error("GTA:SA not found");
+        return;
+    }
+    
+    m_snTimeInMilliseconds = (uint32_t*)(pGTASA + 0x00953138);
+    curShaderStateFlags = (uint32_t*)(pGTASA + 0x006b7094);
+    UnderWaterness = (float*)(pGTASA + 0x00a7d158);
+    
+    LoadGLFunctions();
+    
+    void* addr1 = (void*)aml->GetSym(hGTASA, "_ZN8RQShader11BuildSourceEjPPKcS2_");
+    if(!addr1) addr1 = (void*)(pGTASA + 0x001CFA38);
+    HOOK(RQShaderBuildSource, addr1);
+    
+    void* addr2 = (void*)aml->GetSym(hGTASA, "_ZN9ES2Shader6SelectEv");
+    if(!addr2) addr2 = (void*)(pGTASA + 0x001CD368);
+    HOOK(ES2Shader_Select, addr2);
+    
+    void* addr3 = (void*)aml->GetSym(hGTASA, "_ZN9ES2Shader22InitializeAfterCompileEv");
+    if(!addr3) addr3 = (void*)(pGTASA + 0x001CC7CC);
+    HOOK(ES2Shader_InitAfterCompile, addr3);
+    
+    void* addr4 = (void*)aml->GetSym(hGTASA, "_Z29RwCameraForAllClumpsInFrustumP8RwCameraPv");
+    if(!addr4) addr4 = (void*)(pGTASA + 0x0021e690);
+    HOOK(RwCameraForAllClumpsInFrustum_Hook, addr4);
+    _RwCameraForAllClumpsInFrustum = (RwCameraForAllClumpsInFrustum_t)addr4;
+    
+    logger->Info("DEPTH PREPASS SSAO LOADED");
+    logger->Info("REAL DEPTH BUFFER | 16 SAMPLES");
+    logger->Info("SPIRAL PATTERN | NORMAL RECONSTRUCTION");
+}
+```
+
+Fixed: cast uintptr_t ke void*, hapus duplikasi OnModPreLoad/OnModLoad. isBuilding) {
         logger->Info("SSAO SHADER INJECT at 0x%X", flags);
         
         strncpy(ssaoFragShaderBuf, ssaoFragmentShader, SHADER_LEN - 1);
@@ -543,55 +748,4 @@ extern "C" void OnModLoad() {
     logger->Info("DEPTH PREPASS SSAO LOADED");
     logger->Info("REAL DEPTH BUFFER | 16 SAMPLES");
     logger->Info("SPIRAL PATTERN | NORMAL RECONSTRUCTION");
-}
-```_uFadeoutEnd = -1;
-}
-
-extern "C" void OnModPreLoad() {
-    logger->SetTag("SSAO_BRUTAL3");
-    logger->Info("GLES3 BRUTAL SSAO - PREPARING");
-}
-
-extern "C" void OnModLoad() {
-    logger->SetTag("SSAO_BRUTAL3");
-    
-    pGTASA = aml->GetLib("libGTASA.so");
-    hGTASA = aml->GetLibHandle("libGTASA.so");
-    
-    if(!pGTASA || !hGTASA) {
-        logger->Error("GTA:SA not found");
-        return;
-    }
-    
-    m_snTimeInMilliseconds = (uint32_t*)(pGTASA + 0x00953138);
-    curShaderStateFlags = (uint32_t*)(pGTASA + 0x006b7094);
-    UnderWaterness = (float*)(pGTASA + 0x00a7d158);
-    
-    void* hGLES3 = aml->GetLibHandle("libGLESv3.so");
-    if(!hGLES3) hGLES3 = aml->GetLibHandle("libGLESv2.so");
-    
-    if(hGLES3) {
-        _glGetUniformLocation = (glGetUniformLocation_t)aml->GetSym(hGLES3, "glGetUniformLocation");
-        _glUniform1i = (glUniform1i_t)aml->GetSym(hGLES3, "glUniform1i");
-        _glUniform1fv = (glUniform1fv_t)aml->GetSym(hGLES3, "glUniform1fv");
-        _glUniform2fv = (glUniform2fv_t)aml->GetSym(hGLES3, "glUniform2fv");
-        logger->Info("GLES3 functions loaded");
-    }
-    
-    void* addr1 = (void*)aml->GetSym(hGTASA, "_ZN8RQShader11BuildSourceEjPPKcS2_");
-    if(!addr1) addr1 = (void*)(pGTASA + 0x001CFA38);
-    HOOK(RQShaderBuildSource, addr1);
-    
-    void* addr2 = (void*)aml->GetSym(hGTASA, "_ZN9ES2Shader6SelectEv");
-    if(!addr2) addr2 = (void*)(pGTASA + 0x001CD368);
-    HOOK(ES2Shader_Select, addr2);
-    
-    void* addr3 = (void*)aml->GetSym(hGTASA, "_ZN9ES2Shader22InitializeAfterCompileEv");
-    if(!addr3) addr3 = (void*)(pGTASA + 0x001CC7CC);
-    HOOK(ES2Shader_InitAfterCompile, addr3);
-    
-    logger->Info("GLES3 BRUTAL SSAO LOADED");
-    logger->Info("16 SAMPLES | SPIRAL PATTERN | BAYER DITHER");
-    logger->Info("NORMAL RECONSTRUCTION | EDGE DETECTION");
-    logger->Info("VIGNETTE | FADEOUT | MTA-INSPIRED");
 }
