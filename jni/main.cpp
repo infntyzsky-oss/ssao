@@ -3,13 +3,14 @@
 #include <mod/config.h>
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
+#include <dlfcn.h>
 #include <string.h>
 
-ssatolol(net.ssao.gtasa, SSAO_Mobile, 1.0, ntyzsky)
+MYMOD(net.ssao.gtasa, SSAO_Mobile, 1.0, ntyzsky)
 NEEDGAME(com.rockstargames.gtasa)
 
-uintptr_t pGTASA;
-void* hGTASA;
+uintptr_t pGTASA = 0;
+void* hGTASA = NULL;
 
 // ============================================================================
 // GLSL Shaders
@@ -33,7 +34,6 @@ uniform sampler2D uSceneTex;
 uniform vec2 uPixelSize;
 uniform float uIntensity;
 
-// Simple depth estimation from luminance
 float getDepth(vec2 uv) {
     vec3 col = texture2D(uSceneTex, uv).rgb;
     return dot(col, vec3(0.299, 0.587, 0.114));
@@ -43,19 +43,17 @@ void main() {
     vec3 sceneColor = texture2D(uSceneTex, vTexCoord).rgb;
     float centerDepth = getDepth(vTexCoord);
     
-    // Sample surrounding pixels
     float ao = 0.0;
     float radius = 2.0;
     int samples = 4;
     
     for(int i = 0; i < 4; i++) {
-        float angle = float(i) * 1.5708; // 90 degrees
+        float angle = float(i) * 1.5708;
         vec2 offset = vec2(cos(angle), sin(angle)) * radius * uPixelSize;
         
         float sampleDepth = getDepth(vTexCoord + offset);
         float diff = centerDepth - sampleDepth;
         
-        // Accumulate occlusion
         ao += max(0.0, diff) * 0.5;
     }
     
@@ -71,7 +69,7 @@ void main() {
 // ============================================================================
 
 GLuint shaderProgram = 0;
-GLuint vao = 0, vbo = 0;
+GLuint vbo = 0;
 GLint uSceneTex = -1;
 GLint uPixelSize = -1;
 GLint uIntensity = -1;
@@ -82,9 +80,7 @@ int screenWidth = 1280;
 int screenHeight = 720;
 float aoIntensity = 0.5f;
 
-// Fullscreen quad vertices
 float quadVertices[] = {
-    // Positions   // TexCoords
     -1.0f,  1.0f,  0.0f, 1.0f,
     -1.0f, -1.0f,  0.0f, 0.0f,
      1.0f, -1.0f,  1.0f, 0.0f,
@@ -141,14 +137,12 @@ bool InitSSAOShader() {
     glDeleteShader(vertShader);
     glDeleteShader(fragShader);
     
-    // Get uniform/attribute locations
     uSceneTex = glGetUniformLocation(shaderProgram, "uSceneTex");
     uPixelSize = glGetUniformLocation(shaderProgram, "uPixelSize");
     uIntensity = glGetUniformLocation(shaderProgram, "uIntensity");
     aPosition = glGetAttribLocation(shaderProgram, "aPosition");
     aTexCoord = glGetAttribLocation(shaderProgram, "aTexCoord");
     
-    // Create VBO
     glGenBuffers(1, &vbo);
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
@@ -162,22 +156,18 @@ void ApplySSAO() {
     
     glUseProgram(shaderProgram);
     
-    // Bind VBO
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
     
-    // Setup attributes
     glEnableVertexAttribArray(aPosition);
     glVertexAttribPointer(aPosition, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
     
     glEnableVertexAttribArray(aTexCoord);
     glVertexAttribPointer(aTexCoord, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
     
-    // Set uniforms
     glUniform1i(uSceneTex, 0);
     glUniform2f(uPixelSize, 1.0f / screenWidth, 1.0f / screenHeight);
     glUniform1f(uIntensity, aoIntensity);
     
-    // Draw fullscreen quad
     glDrawArrays(GL_TRIANGLES, 0, 6);
     
     glDisableVertexAttribArray(aPosition);
@@ -188,23 +178,13 @@ void ApplySSAO() {
 // Game Hooks
 // ============================================================================
 
-void (*RenderScene_orig)(bool);
-void RenderScene_hook(bool flag) {
-    // Render normal scene
-    RenderScene_orig(flag);
+DECL_HOOK(void, RenderScene, bool flag) {
+    if(shaderProgram == 0) InitSSAOShader();
     
-    // Apply SSAO post-process (simple version without FBO)
-    // This is a simplified version - real SSAO needs depth buffer
+    RenderScene(flag);
+    
+    // Apply SSAO (simplified - needs proper FBO setup for real SSAO)
     // ApplySSAO();
-}
-
-void (*CameraShowRaster_orig)(void*, void*, unsigned int);
-void CameraShowRaster_hook(void* camera, void* raster, unsigned int flags) {
-    // Apply SSAO before showing raster
-    ApplySSAO();
-    
-    // Show raster normally
-    CameraShowRaster_orig(camera, raster, flags);
 }
 
 // ============================================================================
@@ -227,7 +207,6 @@ extern "C" void OnModLoad() {
         return;
     }
     
-    // Check OpenGL extensions
     const char* extensions = (const char*)glGetString(GL_EXTENSIONS);
     logger->Info("OpenGL Extensions: %s", extensions);
     
@@ -236,15 +215,7 @@ extern "C" void OnModLoad() {
         logger->Error("Real SSAO won't work - using fake AO instead");
     }
     
-    // Initialize SSAO shader
-    if (!InitSSAOShader()) {
-        logger->Error("Failed to initialize SSAO shader!");
-        return;
-    }
-    
-    // Hook render functions
-    HOOK(RenderScene_hook, pGTASA + 0x003f609c);
-    // HOOK(CameraShowRaster_hook, pGTASA + 0x001d5d94); // Alternative hook
+    HOOK(RenderScene, pGTASA + 0x003f609c);
     
     logger->Info("SSAO Mod loaded successfully!");
 }
