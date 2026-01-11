@@ -12,37 +12,37 @@ NEEDGAME(com.rockstargames.gtasa)
 uintptr_t pGTASA = 0;
 void* hGTASA = NULL;
 
-// Game vars
 uint32_t* m_snTimeInMilliseconds;
 float* UnderWaterness;
 uintptr_t TheCamera;
 uint32_t* curShaderStateFlags;
-void** blurPShader;
-void** gradingPShader;
-void** shadowResolvePShader;
-void** contrastVShader;
-void** contrastPShader;
 
-// GL functions
 typedef int (*glGetUniformLocation_t)(int, const char*);
 typedef void (*glUniform1i_t)(int, int);
 typedef void (*glUniform1fv_t)(int, int, const float*);
 typedef void (*glUniform2fv_t)(int, int, const float*);
+typedef void (*glUniform3fv_t)(int, int, const float*);
 
 glGetUniformLocation_t _glGetUniformLocation;
 glUniform1i_t _glUniform1i;
 glUniform1fv_t _glUniform1fv;
 glUniform2fv_t _glUniform2fv;
+glUniform3fv_t _glUniform3fv;
 
-// Camera struct (simplified)
-struct CCamera {
-    char _pad[0x10];
-    float matrix[16];
-    float position[3];
-    char _pad2[0x500];
+struct CMatrix {
+    float right[4];
+    float forward[4];
+    float up[4];
+    float pos[4];
 };
 
-// SSAO shader - GLES2 only
+struct CCamera {
+    char _pad1[0xB54];
+    float vecFrustumNormals[4][3];
+    char _pad2[0x60];
+    CMatrix mCameraMatrix;
+};
+
 const char* ssaoFragmentShader = R"(
 precision mediump float;
 varying vec2 v_texCoord0;
@@ -66,39 +66,33 @@ void main() {
     float depth = getDepth(v_texCoord0);
     
     float ao = 0.0;
-    float radius = 4.0;
-    
+    float radius = 5.0;
     float angleOffset = hash(v_texCoord0 + uTime * 0.001) * 6.28318;
     
     for(int i = 0; i < 16; i++) {
         float angle = (float(i) / 16.0) * 6.28318 + angleOffset;
         float dist = (float(i) / 16.0) * radius;
-        
         vec2 offset = vec2(cos(angle), sin(angle)) * dist * uPixelSize;
         float sampleDepth = getDepth(v_texCoord0 + offset);
-        
         float diff = depth - sampleDepth;
         float weight = smoothstep(0.0, radius * 0.5, dist);
-        
         ao += max(0.0, diff) * weight;
     }
     
     ao = clamp(ao / 16.0, 0.0, 1.0);
-    
-    float distanceFactor = length(uCameraPos) * 0.01;
-    float dynamicIntensity = uIntensity * (1.0 + distanceFactor * 0.5);
-    
+    float distanceFactor = length(uCameraPos) * 0.005;
+    float dynamicIntensity = uIntensity * (1.0 + distanceFactor);
     float occlusion = 1.0 - (ao * dynamicIntensity);
     
     vec2 cornerDist = abs(v_texCoord0 - 0.5) * 2.0;
-    float vignette = 1.0 - pow(max(cornerDist.x, cornerDist.y), 2.0) * 0.15;
+    float vignette = 1.0 - pow(max(cornerDist.x, cornerDist.y), 2.5) * 0.2;
     
     gl_FragColor = vec4(color * occlusion * vignette, 1.0);
 }
 )";
 
 char customFragShader[SHADER_LEN];
-bool bBuildingShaderInjected = false;
+int injectionCount = 0;
 
 struct ES2ShaderEx {
     char base[512];
@@ -108,35 +102,29 @@ struct ES2ShaderEx {
     int uid_uCameraPos;
 };
 
-// Hook postprocess buffer
-DECL_HOOKv(postprocess_buffer, void* buffer, int width, int height) {
-    postprocess_buffer(buffer, width, height);
-}
-
-// Hook shader building
+// HOOK SEMUA SHADER - BRUTE FORCE MODE
 DECL_HOOK(int, RQShaderBuildSource, int flags, char** pxlsrc, char** vtxsrc) {
     int ret = RQShaderBuildSource(flags, pxlsrc, vtxsrc);
     
-    bool isBuilding = (flags == 0x10020430 || flags == 0x12020430 ||   
-                       flags == 0x10220432 || flags == 0x10222432 ||  
-                       flags == 0x10100430 || flags == 0x10120430 ||  
-                       flags == 0x10110430 || flags == 0x10130430 ||  
-                       flags == 0x1010042A || flags == 0x1012042A ||  
-                       flags == 0x1013042A || flags == 0x1011042A ||  
-                       flags == 0x1092042A);
+    // LOG SEMUA FLAGS
+    static int logCount = 0;
+    if(logCount < 50) {
+        logger->Info("SHADER FLAG: 0x%X", flags);
+        logCount++;
+    }
     
-    if(isBuilding && !bBuildingShaderInjected) {
-        logger->Info("INJECTING SSAO to building shader: 0x%X", flags);
+    // INJECT KE SEMUA SHADER (testing mode)
+    if(injectionCount < 10) {
+        logger->Info("BRUTAL INJECT to flag 0x%X (count: %d)", flags, injectionCount);
         strncpy(customFragShader, ssaoFragmentShader, SHADER_LEN - 1);
         customFragShader[SHADER_LEN - 1] = '\0';
         *pxlsrc = customFragShader;
-        bBuildingShaderInjected = true;
+        injectionCount++;
     }
     
     return ret;
 }
 
-// Hook shader selection
 DECL_HOOKv(ES2Shader_Select, ES2ShaderEx* self) {
     ES2Shader_Select(self);
     
@@ -148,7 +136,7 @@ DECL_HOOKv(ES2Shader_Select, ES2ShaderEx* self) {
         self->uid_uCameraPos = _glGetUniformLocation(shaderId, "uCameraPos");
         
         if(self->uid_uPixelSize >= 0) {
-            logger->Info("SSAO uniforms bound: pix=%d, int=%d, time=%d, cam=%d", 
+            logger->Info("SSAO UNIFORMS BOUND! pix=%d int=%d time=%d cam=%d", 
                         self->uid_uPixelSize, self->uid_uIntensity, self->uid_uTime, self->uid_uCameraPos);
         }
     }
@@ -157,7 +145,7 @@ DECL_HOOKv(ES2Shader_Select, ES2ShaderEx* self) {
         float pixelSize[2] = {1.0f / 1920.0f, 1.0f / 1080.0f};
         _glUniform2fv(self->uid_uPixelSize, 1, pixelSize);
         
-        float intensity = 0.9f;
+        float intensity = 1.0f;
         _glUniform1fv(self->uid_uIntensity, 1, &intensity);
         
         if(m_snTimeInMilliseconds) {
@@ -167,86 +155,90 @@ DECL_HOOKv(ES2Shader_Select, ES2ShaderEx* self) {
         
         if(TheCamera && self->uid_uCameraPos >= 0) {
             CCamera* cam = (CCamera*)TheCamera;
-            _glUniform1fv(self->uid_uCameraPos, 3, cam->position);
+            float camPos[3] = {
+                cam->mCameraMatrix.pos[0],
+                cam->mCameraMatrix.pos[1],
+                cam->mCameraMatrix.pos[2]
+            };
+            _glUniform3fv(self->uid_uCameraPos, 1, camPos);
         }
     }
 }
 
-// Hook shader init
 DECL_HOOKv(ES2Shader_InitAfterCompile, ES2ShaderEx* self) {
     ES2Shader_InitAfterCompile(self);
-    
     self->uid_uPixelSize = -1;
     self->uid_uIntensity = -1;
     self->uid_uTime = -1;
     self->uid_uCameraPos = -1;
 }
 
-// Hook entity render
 DECL_HOOKv(CEntity_Render, void* self) {
     CEntity_Render(self);
 }
 
 extern "C" void OnModPreLoad() {
     logger->SetTag("SSAO_BRUTAL");
-    logger->Info("Brutal SSAO initializing...");
+    logger->Info("BRUTAL SSAO PRELOAD");
 }
 
 extern "C" void OnModLoad() {
     logger->SetTag("SSAO_BRUTAL");
+    logger->Info("=== BRUTAL SSAO LOADING ===");
     
     pGTASA = aml->GetLib("libGTASA.so");
     hGTASA = aml->GetLibHandle("libGTASA.so");
     
     if(!pGTASA || !hGTASA) {
-        logger->Error("GTA:SA library not found");
+        logger->Error("FATAL: GTA:SA not found!");
         return;
     }
     
-    // Game vars
+    logger->Info("GTA:SA base: 0x%X", pGTASA);
+    
     m_snTimeInMilliseconds = (uint32_t*)(pGTASA + 0x00953138);
     UnderWaterness = (float*)(pGTASA + 0x00a7d158);
     TheCamera = (uintptr_t)aml->GetSym(hGTASA, "TheCamera");
-    
-    // Shader state vars
     curShaderStateFlags = (uint32_t*)(pGTASA + 0x006b7094);
-    blurPShader = (void**)(pGTASA + 0x0067a264);
-    gradingPShader = (void**)(pGTASA + 0x0067a260);
-    shadowResolvePShader = (void**)(pGTASA + 0x0067a268);
-    contrastVShader = (void**)(pGTASA + 0x0067a258);
-    contrastPShader = (void**)(pGTASA + 0x0067a25c);
     
-    logger->Info("Game vars: Camera=0x%X, ShaderFlags=%p", TheCamera, curShaderStateFlags);
+    logger->Info("TheCamera: 0x%X", TheCamera);
     
-    // GL functions
     void* hGLES = aml->GetLibHandle("libGLESv2.so");
     if(hGLES) {
         _glGetUniformLocation = (glGetUniformLocation_t)aml->GetSym(hGLES, "glGetUniformLocation");
         _glUniform1i = (glUniform1i_t)aml->GetSym(hGLES, "glUniform1i");
         _glUniform1fv = (glUniform1fv_t)aml->GetSym(hGLES, "glUniform1fv");
         _glUniform2fv = (glUniform2fv_t)aml->GetSym(hGLES, "glUniform2fv");
+        _glUniform3fv = (glUniform3fv_t)aml->GetSym(hGLES, "glUniform3fv");
         logger->Info("GLES2 functions loaded");
     }
     
-    logger->Info("Installing hooks...");
+    logger->Info("=== INSTALLING HOOKS ===");
     
-    void* addr_pp = (void*)(pGTASA + 0x00225222);
-    HOOK(postprocess_buffer, addr_pp);
-    
+    // Try symbol first
     void* addr1 = (void*)aml->GetSym(hGTASA, "_ZN8RQShader11BuildSourceEjPPKcS2_");
-    if(!addr1) addr1 = (void*)(pGTASA + 0x001CFA38);
+    if(addr1) {
+        logger->Info("Found RQShader::BuildSource via symbol: %p", addr1);
+    } else {
+        addr1 = (void*)(pGTASA + 0x001CFA38);
+        logger->Info("Using offset for RQShader::BuildSource: %p", addr1);
+    }
     HOOK(RQShaderBuildSource, addr1);
     
     void* addr2 = (void*)aml->GetSym(hGTASA, "_ZN9ES2Shader6SelectEv");
     if(!addr2) addr2 = (void*)(pGTASA + 0x001CD368);
+    logger->Info("ES2Shader::Select: %p", addr2);
     HOOK(ES2Shader_Select, addr2);
     
     void* addr3 = (void*)aml->GetSym(hGTASA, "_ZN9ES2Shader22InitializeAfterCompileEv");
     if(!addr3) addr3 = (void*)(pGTASA + 0x001CC7CC);
+    logger->Info("ES2Shader::InitAfterCompile: %p", addr3);
     HOOK(ES2Shader_InitAfterCompile, addr3);
     
     void* addr4 = (void*)(pGTASA + 0x003ed20c);
+    logger->Info("CEntity::Render: %p", addr4);
     HOOK(CEntity_Render, addr4);
     
-    logger->Info("BRUTAL SSAO LOADED - Camera integration active");
+    logger->Info("=== BRUTAL SSAO READY ===");
+    logger->Info("Injecting to first 10 shaders for testing!");
 }
