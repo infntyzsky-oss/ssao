@@ -178,13 +178,31 @@ void ApplySSAO() {
 // Game Hooks
 // ============================================================================
 
+bool bSSAOInitialized = false;
+
 DECL_HOOK(void, RenderScene, bool flag) {
-    if(shaderProgram == 0) InitSSAOShader();
+    // Init SSAO hanya sekali, setelah OpenGL context ready
+    if(!bSSAOInitialized) {
+        const char* extensions = (const char*)glGetString(GL_EXTENSIONS);
+        if(extensions) {
+            logger->Info("OpenGL Extensions: %s", extensions);
+            
+            if (strstr(extensions, "GL_OES_depth_texture") == NULL) {
+                logger->Error("GL_OES_depth_texture NOT supported!");
+                logger->Error("Real SSAO won't work - using fake AO");
+            }
+            
+            if(InitSSAOShader()) {
+                bSSAOInitialized = true;
+                logger->Info("SSAO initialized successfully!");
+            }
+        }
+    }
     
     RenderScene(flag);
     
-    // Apply SSAO (simplified - needs proper FBO setup for real SSAO)
-    // ApplySSAO();
+    // Apply SSAO here (if needed)
+    // if(bSSAOInitialized) ApplySSAO();
 }
 
 // ============================================================================
@@ -207,15 +225,10 @@ extern "C" void OnModLoad() {
         return;
     }
     
-    const char* extensions = (const char*)glGetString(GL_EXTENSIONS);
-    logger->Info("OpenGL Extensions: %s", extensions);
-    
-    if (strstr(extensions, "GL_OES_depth_texture") == NULL) {
-        logger->Error("GL_OES_depth_texture NOT supported!");
-        logger->Error("Real SSAO won't work - using fake AO instead");
-    }
+    // JANGAN panggil glGetString di sini!
+    // OpenGL context belum ready
     
     HOOK(RenderScene, pGTASA + 0x003f609c);
     
-    logger->Info("SSAO Mod loaded successfully!");
+    logger->Info("SSAO Mod loaded - waiting for OpenGL context...");
 }
