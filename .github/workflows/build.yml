@@ -21,12 +21,12 @@ jobs:
     
     - name: Download AML Headers
       run: |
-        cd jni
-        git clone https://github.com/AndroidModLoader/AML_Headers.git temp
-        cp -r temp/mod .
-        cp -r temp/include .
-        rm -rf temp
-        ls -la
+        wget https://github.com/AndroidModLoader/AndroidModLoader/archive/refs/heads/main.zip
+        unzip -q main.zip
+        cp -r AndroidModLoader-main/mod jni/
+        cp -r AndroidModLoader-main/include jni/
+        rm -rf AndroidModLoader-main main.zip
+        ls -la jni/
         
     - name: Build with NDK
       run: |
@@ -35,5 +35,5 @@ jobs:
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: libSSAO.so
+        name: libSSAO
         path: libs/armeabi-v7a/libSSAO.so
