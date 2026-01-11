@@ -1,9 +1,10 @@
 #include <mod/amlmod.h>
 #include <mod/logger.h>
+#include <mod/config.h>
 #include <GLES2/gl2.h>
 #include <string.h>
 
-MYMOD(net.ssao.gtasa, SSAO_Minimal, 1.0, ntyzsky)
+MYMOD(net.ssao.gtasa, SSAO_v200, 1.0, ntyzsky)
 NEEDGAME(com.rockstargames.gtasa)
 
 #define SHADER_LEN 32768
@@ -45,20 +46,16 @@ void main() {
 char customFragShader[SHADER_LEN];
 bool bInjected = false;
 
-typedef int (*RQShaderBuildSource_t)(int, char**, char**);
-RQShaderBuildSource_t RQShaderBuildSource_orig = NULL;
-
-int RQShaderBuildSource_hook(int flags, char** pxlsrc, char** vtxsrc) {
-    int ret = RQShaderBuildSource_orig(flags, pxlsrc, vtxsrc);
+// RQShader::BuildSource hook
+DECL_HOOK(int, RQShaderBuildSource, int flags, char** pxlsrc, char** vtxsrc) {
+    int ret = RQShaderBuildSource(flags, pxlsrc, vtxsrc);
     
-    // Log first 10 shader flags
     static int count = 0;
-    if(count < 10) {
+    if(count < 15) {
         logger->Info("Shader flag: 0x%X", flags);
         count++;
     }
     
-    // Inject SSAO (try multiple common flags)
     if(!bInjected && (flags == 0x10 || flags == 0x200010 || flags == 0x4000010)) {
         logger->Info("✓ INJECTING SSAO! (flag=0x%X)", flags);
         strncpy(customFragShader, ssaoFragmentShader, SHADER_LEN - 1);
@@ -68,6 +65,11 @@ int RQShaderBuildSource_hook(int flags, char** pxlsrc, char** vtxsrc) {
     }
     
     return ret;
+}
+
+extern "C" void OnModPreLoad() {
+    logger->SetTag("SSAO");
+    logger->Info("SSAO PreLoad");
 }
 
 extern "C" void OnModLoad() {
@@ -81,21 +83,17 @@ extern "C" void OnModLoad() {
         return;
     }
     
-    logger->Info("SSAO Minimal - hooking RQShader::BuildSource only...");
+    logger->Info("Hooking RQShader::BuildSource...");
     
-    // CUMA HOOK 1 FUNCTION
+    // Hook by symbol name
     void* addr = (void*)aml->GetSym(hGTASA, "_ZN8RQShader11BuildSourceEjPPKcS2_");
     
     if(!addr) {
-        logger->Error("Symbol not found! Trying offset...");
+        logger->Error("Symbol not found! Using offset fallback...");
         addr = (void*)(pGTASA + 0x001CFA38);
     }
     
-    if(aml->Hook(addr, (void*)RQShaderBuildSource_hook, (void**)&RQShaderBuildSource_orig)) {
-        logger->Info("✓ Hook SUCCESS!");
-    } else {
-        logger->Error("✗ Hook FAILED!");
-    }
+    HOOK(RQShaderBuildSource, addr);
     
-    logger->Info("SSAO Minimal loaded - check logs for shader flags!");
+    logger->Info("✓ SSAO v2.00 loaded!");
 }
