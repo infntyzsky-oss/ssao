@@ -1,0 +1,30 @@
+name: Build SSAO
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Setup NDK
+      uses: nttld/setup-ndk@v1
+      with:
+        ndk-version: r21e
+        
+    - name: Build with NDK
+      run: |
+        cd jni
+        $ANDROID_NDK_HOME/ndk-build NDK_PROJECT_PATH=. NDK_APPLICATION_MK=Application.mk
+        
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: libSSAO.so
+        path: libs/armeabi-v7a/libSSAO.so
