@@ -82,6 +82,8 @@ int screenHeight = 1080;
 void CreateDepthTarget() {
     if(depthTargetReady) return;
     
+    logger->Info("Creating depth target...");
+    
     _glGenTextures(1, &depthTexture);
     _glBindTexture(GL_TEXTURE_2D, depthTexture);
     _glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, screenWidth, screenHeight, 
@@ -299,16 +301,11 @@ DECL_HOOKv(glUniformMatrix3fv_Hook, int location, int count, uint8_t transpose, 
 DECL_HOOK(int, RQShaderBuildSource, int flags, char** pxlsrc, char** vtxsrc) {
     int ret = RQShaderBuildSource(flags, pxlsrc, vtxsrc);
     
-    bool isBuilding = (flags == 0x10020430 || flags == 0x12020430 ||
-                       flags == 0x10220432 || flags == 0x10222432 ||
-                       flags == 0x10100430 || flags == 0x10120430 ||
-                       flags == 0x10110430 || flags == 0x10130430 ||
-                       flags == 0x1010042A || flags == 0x1012042A ||
-                       flags == 0x1013042A || flags == 0x1011042A ||
-                       flags == 0x1092042A);
+    static int injectCount = 0;
     
-    if(isDepthPass && !depthShaderInjected && isBuilding) {
-        logger->Info("DEPTH SHADER INJECT at 0x%X", flags);
+    // INJECT KE SEMUA SHADER (NO FILTER)
+    if(isDepthPass && !depthShaderInjected) {
+        logger->Info("DEPTH SHADER INJECT at 0x%X (inject #%d)", flags, injectCount++);
         
         strncpy(depthFragShaderBuf, depthFragmentShader, SHADER_LEN - 1);
         depthFragShaderBuf[SHADER_LEN - 1] = '\0';
@@ -320,8 +317,8 @@ DECL_HOOK(int, RQShaderBuildSource, int flags, char** pxlsrc, char** vtxsrc) {
         
         depthShaderInjected = true;
     }
-    else if(!isDepthPass && !ssaoShaderInjected && isBuilding) {
-        logger->Info("SSAO SHADER INJECT at 0x%X", flags);
+    else if(!isDepthPass && !ssaoShaderInjected) {
+        logger->Info("SSAO SHADER INJECT at 0x%X (inject #%d)", flags, injectCount++);
         
         strncpy(ssaoFragShaderBuf, ssaoFragmentShader, SHADER_LEN - 1);
         ssaoFragShaderBuf[SHADER_LEN - 1] = '\0';
@@ -348,7 +345,7 @@ DECL_HOOKv(ES2Shader_Select, SSAOShaderEx* self) {
         DepthShaderEx* depthShader = (DepthShaderEx*)self;
         if(depthShader->uid_uMVP == -1) {
             depthShader->uid_uMVP = _glGetUniformLocation(shaderId, "uMVP");
-            logger->Info("Depth shader uniforms loaded");
+            logger->Info("Depth shader uniforms loaded (uid_uMVP: %d)", depthShader->uid_uMVP);
         }
         
         if(depthShader->uid_uMVP >= 0 && matrixCaptured) {
@@ -367,7 +364,8 @@ DECL_HOOKv(ES2Shader_Select, SSAOShaderEx* self) {
             self->uid_uFadeoutStart = _glGetUniformLocation(shaderId, "uFadeoutStart");
             self->uid_uFadeoutEnd = _glGetUniformLocation(shaderId, "uFadeoutEnd");
             
-            logger->Info("SSAO shader uniforms loaded");
+            logger->Info("SSAO shader uniforms loaded (uDepthTex: %d, uPixelSize: %d)", 
+                        self->uid_uDepthTex, self->uid_uPixelSize);
         }
         
         if(self->uid_uDepthTex >= 0) {
@@ -423,7 +421,16 @@ DECL_HOOKv(ES2Shader_InitAfterCompile, SSAOShaderEx* self) {
 typedef void (*RwCameraForAllClumpsInFrustum_t)(RwCamera*, void*);
 RwCameraForAllClumpsInFrustum_t _RwCameraForAllClumpsInFrustum;
 
+static int frameCount = 0;
+
 DECL_HOOKv(RwCameraForAllClumpsInFrustum_Hook, RwCamera* camera, void* callback) {
+    frameCount++;
+    
+    if(frameCount % 60 == 0) {
+        logger->Info("Frame %d, depthTargetReady: %d, matrixCaptured: %d", 
+                    frameCount, depthTargetReady, matrixCaptured);
+    }
+    
     if(!depthTargetReady) {
         CreateDepthTarget();
     }
@@ -447,6 +454,8 @@ DECL_HOOKv(RwCameraForAllClumpsInFrustum_Hook, RwCamera* camera, void* callback)
 }
 
 void LoadGLFunctions() {
+    logger->Info("LoadGLFunctions START");
+    
     void* hGLES = aml->GetLibHandle("libGLESv3.so");
     if(!hGLES) hGLES = aml->GetLibHandle("libGLESv2.so");
     
@@ -454,6 +463,8 @@ void LoadGLFunctions() {
         logger->Error("OpenGL library not found");
         return;
     }
+    
+    logger->Info("hGLES: %p", hGLES);
     
     _glGetUniformLocation = (glGetUniformLocation_t)aml->GetSym(hGLES, "glGetUniformLocation");
     _glUniform1i = (glUniform1i_t)aml->GetSym(hGLES, "glUniform1i");
@@ -496,9 +507,12 @@ extern "C" void OnModPreLoad() {
 
 extern "C" void OnModLoad() {
     logger->SetTag("SSAO_DEPTH");
+    logger->Info("OnModLoad START");
     
     pGTASA = aml->GetLib("libGTASA.so");
     hGTASA = aml->GetLibHandle("libGTASA.so");
+    
+    logger->Info("pGTASA: 0x%X, hGTASA: %p", pGTASA, hGTASA);
     
     if(!pGTASA || !hGTASA) {
         logger->Error("GTA:SA not found");
@@ -513,22 +527,25 @@ extern "C" void OnModLoad() {
     
     void* addr1 = (void*)aml->GetSym(hGTASA, "_ZN8RQShader11BuildSourceEjPPKcS2_");
     if(!addr1) addr1 = (void*)(pGTASA + 0x001CFA38);
+    logger->Info("Hook addr1 (RQShaderBuildSource): %p", addr1);
     HOOK(RQShaderBuildSource, addr1);
     
     void* addr2 = (void*)aml->GetSym(hGTASA, "_ZN9ES2Shader6SelectEv");
     if(!addr2) addr2 = (void*)(pGTASA + 0x001CD368);
+    logger->Info("Hook addr2 (ES2Shader_Select): %p", addr2);
     HOOK(ES2Shader_Select, addr2);
     
     void* addr3 = (void*)aml->GetSym(hGTASA, "_ZN9ES2Shader22InitializeAfterCompileEv");
     if(!addr3) addr3 = (void*)(pGTASA + 0x001CC7CC);
+    logger->Info("Hook addr3 (ES2Shader_InitAfterCompile): %p", addr3);
     HOOK(ES2Shader_InitAfterCompile, addr3);
     
     void* addr4 = (void*)aml->GetSym(hGTASA, "_Z29RwCameraForAllClumpsInFrustumP8RwCameraPv");
     if(!addr4) addr4 = (void*)(pGTASA + 0x0021e690);
+    logger->Info("Hook addr4 (RwCameraForAllClumpsInFrustum): %p", addr4);
     HOOK(RwCameraForAllClumpsInFrustum_Hook, addr4);
     _RwCameraForAllClumpsInFrustum = (RwCameraForAllClumpsInFrustum_t)addr4;
     
-    logger->Info("DEPTH PREPASS SSAO LOADED");
-    logger->Info("REAL DEPTH BUFFER | 16 SAMPLES");
-    logger->Info("SPIRAL PATTERN | NORMAL RECONSTRUCTION");
+    logger->Info("ALL HOOKS INSTALLED");
+    logger->Info("DEPTH PREPASS SSAO LOADED - NO FILTER MODE");
 }
