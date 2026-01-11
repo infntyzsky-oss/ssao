@@ -45,7 +45,6 @@ void main() {
     
     float ao = 0.0;
     float radius = 2.0;
-    int samples = 4;
     
     for(int i = 0; i < 4; i++) {
         float angle = float(i) * 1.5708;
@@ -57,42 +56,15 @@ void main() {
         ao += max(0.0, diff) * 0.5;
     }
     
-    ao = clamp(ao / float(samples), 0.0, 1.0);
+    ao = clamp(ao / 4.0, 0.0, 1.0);
     float occlusion = 1.0 - (ao * uIntensity);
     
     gl_FragColor = vec4(sceneColor * occlusion, 1.0);
 }
 )";
 
-// ============================================================================
-// OpenGL Resources
-// ============================================================================
-
 GLuint shaderProgram = 0;
-GLuint vbo = 0;
-GLint uSceneTex = -1;
-GLint uPixelSize = -1;
-GLint uIntensity = -1;
-GLint aPosition = -1;
-GLint aTexCoord = -1;
-
-int screenWidth = 1280;
-int screenHeight = 720;
-float aoIntensity = 0.5f;
-
-float quadVertices[] = {
-    -1.0f,  1.0f,  0.0f, 1.0f,
-    -1.0f, -1.0f,  0.0f, 0.0f,
-     1.0f, -1.0f,  1.0f, 0.0f,
-    
-    -1.0f,  1.0f,  0.0f, 1.0f,
-     1.0f, -1.0f,  1.0f, 0.0f,
-     1.0f,  1.0f,  1.0f, 1.0f
-};
-
-// ============================================================================
-// Shader Compilation
-// ============================================================================
+bool bSSAOInitialized = false;
 
 GLuint CompileShader(GLenum type, const char* source) {
     GLuint shader = glCreateShader(type);
@@ -104,25 +76,21 @@ GLuint CompileShader(GLenum type, const char* source) {
     if (!success) {
         char infoLog[512];
         glGetShaderInfoLog(shader, 512, NULL, infoLog);
-        logger->Error("Shader compilation failed: %s", infoLog);
+        logger->Error("Shader error: %s", infoLog);
         return 0;
     }
-    
     return shader;
 }
 
 bool InitSSAOShader() {
-    GLuint vertShader = CompileShader(GL_VERTEX_SHADER, vertexShaderSrc);
-    GLuint fragShader = CompileShader(GL_FRAGMENT_SHADER, fragmentShaderSrc);
+    GLuint vs = CompileShader(GL_VERTEX_SHADER, vertexShaderSrc);
+    GLuint fs = CompileShader(GL_FRAGMENT_SHADER, fragmentShaderSrc);
     
-    if (!vertShader || !fragShader) {
-        logger->Error("Failed to compile shaders!");
-        return false;
-    }
+    if (!vs || !fs) return false;
     
     shaderProgram = glCreateProgram();
-    glAttachShader(shaderProgram, vertShader);
-    glAttachShader(shaderProgram, fragShader);
+    glAttachShader(shaderProgram, vs);
+    glAttachShader(shaderProgram, fs);
     glLinkProgram(shaderProgram);
     
     GLint success;
@@ -130,89 +98,55 @@ bool InitSSAOShader() {
     if (!success) {
         char infoLog[512];
         glGetProgramInfoLog(shaderProgram, 512, NULL, infoLog);
-        logger->Error("Program linking failed: %s", infoLog);
+        logger->Error("Link error: %s", infoLog);
         return false;
     }
     
-    glDeleteShader(vertShader);
-    glDeleteShader(fragShader);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
     
-    uSceneTex = glGetUniformLocation(shaderProgram, "uSceneTex");
-    uPixelSize = glGetUniformLocation(shaderProgram, "uPixelSize");
-    uIntensity = glGetUniformLocation(shaderProgram, "uIntensity");
-    aPosition = glGetAttribLocation(shaderProgram, "aPosition");
-    aTexCoord = glGetAttribLocation(shaderProgram, "aTexCoord");
-    
-    glGenBuffers(1, &vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
-    
-    logger->Info("SSAO Shader initialized successfully!");
+    logger->Info("SSAO shader compiled: program=%d", shaderProgram);
     return true;
 }
 
-void ApplySSAO() {
-    if (shaderProgram == 0) return;
-    
-    glUseProgram(shaderProgram);
-    
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    
-    glEnableVertexAttribArray(aPosition);
-    glVertexAttribPointer(aPosition, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
-    
-    glEnableVertexAttribArray(aTexCoord);
-    glVertexAttribPointer(aTexCoord, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
-    
-    glUniform1i(uSceneTex, 0);
-    glUniform2f(uPixelSize, 1.0f / screenWidth, 1.0f / screenHeight);
-    glUniform1f(uIntensity, aoIntensity);
-    
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-    
-    glDisableVertexAttribArray(aPosition);
-    glDisableVertexAttribArray(aTexCoord);
-}
-
 // ============================================================================
-// Game Hooks
+// Hook RwCamera Render
 // ============================================================================
 
-bool bSSAOInitialized = false;
-
-DECL_HOOK(void, RenderScene, bool flag) {
-    // Init SSAO hanya sekali, setelah OpenGL context ready
+DECL_HOOK(void*, _rwCameraValRender, void* camera) {
+    // Init shader first time OpenGL context ready
     if(!bSSAOInitialized) {
-        const char* extensions = (const char*)glGetString(GL_EXTENSIONS);
-        if(extensions) {
-            logger->Info("OpenGL Extensions: %s", extensions);
+        const char* ext = (const char*)glGetString(GL_EXTENSIONS);
+        if(ext) {
+            logger->Info("OpenGL ready!");
             
-            if (strstr(extensions, "GL_OES_depth_texture") == NULL) {
-                logger->Error("GL_OES_depth_texture NOT supported!");
-                logger->Error("Real SSAO won't work - using fake AO");
+            if(strstr(ext, "GL_OES_depth_texture")) {
+                logger->Info("✓ Depth texture supported");
+            } else {
+                logger->Info("✗ Depth texture NOT supported - using fake AO");
             }
             
             if(InitSSAOShader()) {
                 bSSAOInitialized = true;
-                logger->Info("SSAO initialized successfully!");
+                logger->Info("SSAO initialized!");
             }
         }
     }
     
-    RenderScene(flag);
+    // Render camera normally
+    void* result = _rwCameraValRender(camera);
     
-    // Apply SSAO here (if needed)
-    // if(bSSAOInitialized) ApplySSAO();
+    // Apply SSAO post-process here (if needed)
+    // if(bSSAOInitialized && shaderProgram) {
+    //     ApplySSAO();
+    // }
+    
+    return result;
 }
 
 // ============================================================================
 // Mod Entry Point
 // ============================================================================
-
-extern "C" void OnModPreLoad() {
-    logger->SetTag("SSAO");
-    logger->Info("SSAO Mod PreLoad");
-}
 
 extern "C" void OnModLoad() {
     logger->SetTag("SSAO");
@@ -221,14 +155,12 @@ extern "C" void OnModLoad() {
     hGTASA = aml->GetLibHandle("libGTASA.so");
     
     if (!pGTASA || !hGTASA) {
-        logger->Error("Failed to get GTA:SA library!");
+        logger->Error("GTA:SA not found!");
         return;
     }
     
-    // JANGAN panggil glGetString di sini!
-    // OpenGL context belum ready
+    // Hook _rwCameraValRender (offset dari symbol lu)
+    HOOK(_rwCameraValRender, pGTASA + 0x001d7140);
     
-    HOOK(RenderScene, pGTASA + 0x003f609c);
-    
-    logger->Info("SSAO Mod loaded - waiting for OpenGL context...");
+    logger->Info("SSAO loaded - hooked RwCamera render");
 }
