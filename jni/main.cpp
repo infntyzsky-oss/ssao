@@ -102,18 +102,15 @@ struct ES2ShaderEx {
     int uid_uCameraPos;
 };
 
-// HOOK SEMUA SHADER - BRUTE FORCE MODE
 DECL_HOOK(int, RQShaderBuildSource, int flags, char** pxlsrc, char** vtxsrc) {
     int ret = RQShaderBuildSource(flags, pxlsrc, vtxsrc);
     
-    // LOG SEMUA FLAGS
     static int logCount = 0;
     if(logCount < 50) {
         logger->Info("SHADER FLAG: 0x%X", flags);
         logCount++;
     }
     
-    // INJECT KE SEMUA SHADER (testing mode)
     if(injectionCount < 10) {
         logger->Info("BRUTAL INJECT to flag 0x%X (count: %d)", flags, injectionCount);
         strncpy(customFragShader, ssaoFragmentShader, SHADER_LEN - 1);
@@ -173,10 +170,6 @@ DECL_HOOKv(ES2Shader_InitAfterCompile, ES2ShaderEx* self) {
     self->uid_uCameraPos = -1;
 }
 
-DECL_HOOKv(CEntity_Render, void* self) {
-    CEntity_Render(self);
-}
-
 extern "C" void OnModPreLoad() {
     logger->SetTag("SSAO_BRUTAL");
     logger->Info("BRUTAL SSAO PRELOAD");
@@ -215,7 +208,6 @@ extern "C" void OnModLoad() {
     
     logger->Info("=== INSTALLING HOOKS ===");
     
-    // Try symbol first
     void* addr1 = (void*)aml->GetSym(hGTASA, "_ZN8RQShader11BuildSourceEjPPKcS2_");
     if(addr1) {
         logger->Info("Found RQShader::BuildSource via symbol: %p", addr1);
@@ -235,10 +227,10 @@ extern "C" void OnModLoad() {
     logger->Info("ES2Shader::InitAfterCompile: %p", addr3);
     HOOK(ES2Shader_InitAfterCompile, addr3);
     
-    void* addr4 = (void*)(pGTASA + 0x003ed20c);
-    logger->Info("CEntity::Render: %p", addr4);
-    HOOK(CEntity_Render, addr4);
+    // HAPUS HOOK CEntity - INI YANG BIKIN CRASH
+    // void* addr4 = (void*)(pGTASA + 0x003ed20c);
+    // HOOK(CEntity_Render, addr4);
     
     logger->Info("=== BRUTAL SSAO READY ===");
-    logger->Info("Injecting to first 10 shaders for testing!");
+    logger->Info("Injecting to first 10 shaders - NO CEntity hook");
 }
