@@ -3,34 +3,17 @@
 #include <mod/config.h>
 #include <GLES2/gl2.h>
 #include <string.h>
-#include <stdio.h>
 
-MYMOD(net.ssao.gtasa, SSAO_v200, 1.0, ntyzsky)
+MYMOD(net.ssao.gtasa, SSAO_Dynamic, 1.0, ntyzsky)
 NEEDGAME(com.rockstargames.gtasa)
 
 #define SHADER_LEN 32768
 
-// ============================================================================
-// Game Variables
-// ============================================================================
 uintptr_t pGTASA = 0;
 void* hGTASA = NULL;
 
-uint32_t* m_snTimeInMilliseconds;
-float* UnderWaterness;
-uint32_t* curShaderStateFlags;
-
-// GL Functions
-typedef int (*glGetUniformLocation_t)(int, const char*);
-typedef void (*glUniform1fv_t)(int, int, const float*);
-typedef void (*glUniform2fv_t)(int, int, const float*);
-
-glGetUniformLocation_t _glGetUniformLocation;
-glUniform1fv_t _glUniform1fv;
-glUniform2fv_t _glUniform2fv;
-
 // ============================================================================
-// SSAO Shader
+// SSAO Shader Code
 // ============================================================================
 
 const char* ssaoFragmentShader = R"(
@@ -75,18 +58,28 @@ void main() {
 )";
 
 char customFragShader[SHADER_LEN];
+char customVertShader[SHADER_LEN];
 bool bSSAOInjected = false;
 
 // ============================================================================
-// Shader Hooks
+// Hook RQShaderBuildSource via SYMBOL NAME (like SAShaderLoader)
 // ============================================================================
 
-// RQShader::BuildSource (0x001cfa38)
-DECL_HOOK(int, RQShaderBuildSource, int flags, char** pxlsrc, char** vtxsrc) {
-    int ret = RQShaderBuildSource(flags, pxlsrc, vtxsrc);
+typedef int (*RQShaderBuildSource_t)(int, char**, char**);
+RQShaderBuildSource_t RQShaderBuildSource_orig = NULL;
+
+int RQShaderBuildSource_hook(int flags, char** pxlsrc, char** vtxsrc) {
+    int ret = RQShaderBuildSource_orig(flags, pxlsrc, vtxsrc);
     
-    // Inject SSAO shader for basic 2D rendering
-    if(flags == 0x10 && !bSSAOInjected) {
+    // Log all shader flags to find the right one
+    static int logCount = 0;
+    if(logCount < 20) {
+        logger->Info("Shader flag: 0x%X", flags);
+        logCount++;
+    }
+    
+    // Inject SSAO shader (try flag 0x10 first, adjust if needed)
+    if((flags == 0x10 || flags == 0x200010) && !bSSAOInjected) {
         logger->Info("Injecting SSAO fragment shader (flags=0x%X)", flags);
         strncpy(customFragShader, ssaoFragmentShader, SHADER_LEN - 1);
         customFragShader[SHADER_LEN - 1] = '\0';
@@ -97,48 +90,82 @@ DECL_HOOK(int, RQShaderBuildSource, int flags, char** pxlsrc, char** vtxsrc) {
     return ret;
 }
 
-// ES2Shader extended with custom uniforms
+// ============================================================================
+// ES2Shader Extended
+// ============================================================================
+
 struct ES2ShaderEx {
     char base[256];
     int uid_uPixelSize;
     int uid_uIntensity;
 };
 
-// ES2Shader::Select (0x001cd368)
-DECL_HOOKv(ES2Shader_Select, ES2ShaderEx* self) {
-    ES2Shader_Select(self);
+typedef void (*ES2Shader_Select_t)(void*);
+ES2Shader_Select_t ES2Shader_Select_orig = NULL;
+
+void ES2Shader_Select_hook(ES2ShaderEx* self) {
+    ES2Shader_Select_orig(self);
     
-    // Initialize uniforms if needed
+    // Get GL function
+    typedef int (*glGetUniformLocation_t)(int, const char*);
+    typedef void (*glUniform1fv_t)(int, int, const float*);
+    typedef void (*glUniform2fv_t)(int, int, const float*);
+    
+    static glGetUniformLocation_t _glGetUniformLocation = NULL;
+    static glUniform1fv_t _glUniform1fv = NULL;
+    static glUniform2fv_t _glUniform2fv = NULL;
+    
+    if(!_glGetUniformLocation) {
+        _glGetUniformLocation = (glGetUniformLocation_t)aml->GetSym(hGTASA, "glGetUniformLocation");
+        _glUniform1fv = (glUniform1fv_t)aml->GetSym(hGTASA, "glUniform1fv");
+        _glUniform2fv = (glUniform2fv_t)aml->GetSym(hGTASA, "glUniform2fv");
+        
+        if(!_glGetUniformLocation) {
+            void* hGLES = aml->GetLibHandle("libGLESv2.so");
+            _glGetUniformLocation = (glGetUniformLocation_t)aml->GetSym(hGLES, "glGetUniformLocation");
+            _glUniform1fv = (glUniform1fv_t)aml->GetSym(hGLES, "glUniform1fv");
+            _glUniform2fv = (glUniform2fv_t)aml->GetSym(hGLES, "glUniform2fv");
+        }
+    }
+    
+    if(!_glGetUniformLocation) return;
+    
+    // Initialize uniforms
     if(self->uid_uPixelSize == -1) {
         int shaderId = *(int*)self;
         self->uid_uPixelSize = _glGetUniformLocation(shaderId, "uPixelSize");
         self->uid_uIntensity = _glGetUniformLocation(shaderId, "uIntensity");
         
         if(self->uid_uPixelSize >= 0) {
-            logger->Info("SSAO shader active! Uniforms found.");
+            logger->Info("SSAO shader active! Uniforms: pixelSize=%d, intensity=%d", 
+                        self->uid_uPixelSize, self->uid_uIntensity);
         }
     }
     
     // Update uniforms
-    if(self->uid_uPixelSize >= 0) {
+    if(self->uid_uPixelSize >= 0 && _glUniform2fv) {
         float pixelSize[2] = {1.0f / 1280.0f, 1.0f / 720.0f};
         _glUniform2fv(self->uid_uPixelSize, 1, pixelSize);
         
-        float intensity = 0.5f;
-        _glUniform1fv(self->uid_uIntensity, 1, &intensity);
+        if(_glUniform1fv) {
+            float intensity = 0.7f;
+            _glUniform1fv(self->uid_uIntensity, 1, &intensity);
+        }
     }
 }
 
-// ES2Shader::InitializeAfterCompile (0x001cc7cc)
-DECL_HOOKv(ES2Shader_InitAfterCompile, ES2ShaderEx* self) {
-    ES2Shader_InitAfterCompile(self);
+typedef void (*ES2Shader_InitAfterCompile_t)(void*);
+ES2Shader_InitAfterCompile_t ES2Shader_InitAfterCompile_orig = NULL;
+
+void ES2Shader_InitAfterCompile_hook(ES2ShaderEx* self) {
+    ES2Shader_InitAfterCompile_orig(self);
     
     self->uid_uPixelSize = -1;
     self->uid_uIntensity = -1;
 }
 
 // ============================================================================
-// Mod Entry
+// Mod Entry - Hook by SYMBOL NAME
 // ============================================================================
 
 extern "C" void OnModLoad() {
@@ -148,24 +175,47 @@ extern "C" void OnModLoad() {
     hGTASA = aml->GetLibHandle("libGTASA.so");
     
     if(!pGTASA || !hGTASA) {
-        logger->Error("GTA:SA lib not found!");
+        logger->Error("GTA:SA not found!");
         return;
     }
     
-    // Get variables
-    m_snTimeInMilliseconds = (uint32_t*)(pGTASA + 0x00953138);
-    UnderWaterness = (float*)(pGTASA + 0x00a7d158);
-    curShaderStateFlags = (uint32_t*)(pGTASA + 0x006b7094);
+    logger->Info("Hooking by symbol names (no hardcoded offsets)...");
     
-    // Get GL functions (from PLT)
-    _glGetUniformLocation = (glGetUniformLocation_t)(*(void**)(pGTASA + 0x0019f070));
-    _glUniform1fv = (glUniform1fv_t)(*(void**)(pGTASA + 0x00195944));
-    _glUniform2fv = (glUniform2fv_t)(*(void**)(pGTASA + 0x001986e0));
+    // Hook RQShader::BuildSource by symbol
+    void* buildSourceAddr = aml->GetSym(hGTASA, "_ZN8RQShader11BuildSourceEjPPKcS2_");
+    if(buildSourceAddr) {
+        if(aml->Hook(buildSourceAddr, (void*)RQShaderBuildSource_hook, (void**)&RQShaderBuildSource_orig)) {
+            logger->Info("✓ Hooked RQShader::BuildSource");
+        } else {
+            logger->Error("✗ Failed to hook RQShader::BuildSource");
+        }
+    } else {
+        logger->Error("✗ Symbol _ZN8RQShader11BuildSourceEjPPKcS2_ not found!");
+    }
     
-    // HOOK (bukan HOOKPLT!)
-    HOOK(RQShaderBuildSource, pGTASA + 0x001cfa38);
-    HOOK(ES2Shader_Select, pGTASA + 0x001cd368);
-    HOOK(ES2Shader_InitAfterCompile, pGTASA + 0x001cc7cc);
+    // Hook ES2Shader::Select by symbol
+    void* selectAddr = aml->GetSym(hGTASA, "_ZN9ES2Shader6SelectEv");
+    if(selectAddr) {
+        if(aml->Hook(selectAddr, (void*)ES2Shader_Select_hook, (void**)&ES2Shader_Select_orig)) {
+            logger->Info("✓ Hooked ES2Shader::Select");
+        } else {
+            logger->Error("✗ Failed to hook ES2Shader::Select");
+        }
+    } else {
+        logger->Error("✗ Symbol _ZN9ES2Shader6SelectEv not found!");
+    }
     
-    logger->Info("SSAO v2.00 loaded!");
+    // Hook ES2Shader::InitializeAfterCompile by symbol
+    void* initAddr = aml->GetSym(hGTASA, "_ZN9ES2Shader22InitializeAfterCompileEv");
+    if(initAddr) {
+        if(aml->Hook(initAddr, (void*)ES2Shader_InitAfterCompile_hook, (void**)&ES2Shader_InitAfterCompile_orig)) {
+            logger->Info("✓ Hooked ES2Shader::InitializeAfterCompile");
+        } else {
+            logger->Error("✗ Failed to hook ES2Shader::InitializeAfterCompile");
+        }
+    } else {
+        logger->Error("✗ Symbol _ZN9ES2Shader22InitializeAfterCompileEv not found!");
+    }
+    
+    logger->Info("SSAO Dynamic loaded - waiting for shader injection...");
 }
