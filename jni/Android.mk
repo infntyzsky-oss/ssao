@@ -1,10 +1,9 @@
 LOCAL_PATH := $(call my-dir)
 
 include $(CLEAR_VARS)
-LOCAL_CPP_EXTENSION := .cpp .cc
-LOCAL_MODULE    := SSAO
-LOCAL_SRC_FILES := main.cpp mod/logger.cpp mod/config.cpp
-LOCAL_CFLAGS += -O2 -mfloat-abi=softfp -DNDEBUG -std=c++17
-LOCAL_C_INCLUDES += $(LOCAL_PATH)/include
-LOCAL_LDLIBS += -llog -lGLESv3
+LOCAL_MODULE := SSAO_Complete
+LOCAL_SRC_FILES := SSAO_Complete.cpp
+LOCAL_LDLIBS := -llog -lGLESv3 -ldl -lm
+LOCAL_CPPFLAGS := -std=c++17 -O3 -ffast-math -fno-exceptions
+LOCAL_CFLAGS := -DNDEBUG
 include $(BUILD_SHARED_LIBRARY)
